@@ -1,0 +1,13 @@
+[package]
+name = "zeronix"
+version = "0.1.0"
+edition = "2024"
+
+[build]
+target = "x86_64-unknown-none"
+rustflags = ["-C", "link-arg=-Tlinker.ld"]
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"

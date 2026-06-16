@@ -1,0 +1,23 @@
+[toolchain]
+# 操作系统开发需要 nightly：自定义 target、内联汇编、某些 unstable feature 等
+channel = "nightly"
+
+# minimal 只包含 rustc、cargo、rust-std，再通过 components 补充开发所需工具
+profile = "minimal"
+
+components = [
+    # 必须：用于编译 no_std 内核时链接 core/alloc 等标准库源码
+    "rust-src",
+    # 必须：提供 llvm-ar、llvm-objcopy、llvm-objdump 等工具
+    "llvm-tools-preview",
+    # 推荐：代码格式化
+    "rustfmt",
+    # 推荐：静态检查
+    "clippy",
+]
+
+# 如果你使用自定义 target JSON（如 target/x86_64-zeronix.json），
+# 可以不列在这里；否则使用内置 target
+targets = [
+    "x86_64-unknown-none",
+]
