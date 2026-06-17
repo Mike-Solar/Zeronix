@@ -93,6 +93,8 @@ static mut __SYSCALL_USER_RSP: u64 = 0;
 static KERNEL_FS: SpinLock<Option<RamFs>> = SpinLock::new(None);
 static KERNEL_FD_TABLE: SpinLock<Option<fd::FileDescriptorTable>> = SpinLock::new(None);
 static CONSOLE_WRITE: SpinLock<Option<fn(&[u8])>> = SpinLock::new(None);
+static EXEC_PROGRAM: SpinLock<Option<fn(&[u8]) -> SysResult>> = SpinLock::new(None);
+static EXIT_CURRENT: SpinLock<Option<fn(usize) -> !>> = SpinLock::new(None);
 
 unsafe extern "C" {
     fn __syscall_entry();
@@ -133,6 +135,11 @@ pub fn init_runtime_fs() {
 
 pub fn set_console_write(writer: fn(&[u8])) {
     CONSOLE_WRITE.lock().replace(writer);
+}
+
+pub fn set_process_hooks(exec_program: fn(&[u8]) -> SysResult, exit_current: fn(usize) -> !) {
+    EXEC_PROGRAM.lock().replace(exec_program);
+    EXIT_CURRENT.lock().replace(exit_current);
 }
 
 pub fn with_runtime_fs<T>(f: impl FnOnce(&mut RamFs) -> T) -> Option<T> {
@@ -224,7 +231,13 @@ fn dispatch(
         x if x == SyscallNumber::Fork as usize => SyscallTable::fork(),
         x if x == SyscallNumber::Exec as usize => {
             let path = unsafe { copy_user_cstr(arg0 as *const u8)? };
-            SyscallTable::exec(&path, &[])
+            with_fs(|fs| SyscallTable::exec(fs, &path, &[]))
+        }
+        x if x == SyscallNumber::Exit as usize => {
+            if let Some(exit_current) = *EXIT_CURRENT.lock() {
+                exit_current(arg0)
+            }
+            Err(SysError::Unsupported)
         }
         _ => Err(SysError::NoSuchSyscall),
     }
@@ -391,10 +404,10 @@ impl SyscallTable {
         Err(SysError::Unsupported)
     }
 
-    pub fn exec(_path: &str, _argv: &[&str]) -> SysResult {
-        // TODO: exec 需要 ELF/扁平二进制装载器，把新程序映射进当前进程地址空间，
-        // 重建用户栈并替换 TrapFrame.rip/rsp。
-        Err(SysError::Unsupported)
+    pub fn exec(fs: &mut RamFs, path: &str, _argv: &[&str]) -> SysResult {
+        let image = fs.read(path)?;
+        let exec_program = *EXEC_PROGRAM.lock();
+        exec_program.ok_or(SysError::Unsupported)?(&image)
     }
 }
 

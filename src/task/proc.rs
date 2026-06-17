@@ -13,6 +13,7 @@ use crate::task::proc_layout::{
 };
 use crate::trap;
 use crate::trap::gdt::{self, USER_CODE_SELECTOR, USER_DATA_SELECTOR};
+use crate::user::elf;
 use crate::BUDDY_ALLOCATOR;
 
 unsafe extern "C" {
@@ -42,6 +43,10 @@ impl ProcRef {
     fn as_ptr(self) -> *mut Proc {
         self.0
     }
+
+    pub fn pid(self) -> u64 {
+        unsafe { (*self.as_ptr()).pid }
+    }
 }
 
 pub struct Proc {
@@ -65,6 +70,13 @@ pub type KernelEntry = fn() -> !;
 pub enum ProcKind {
     Kernel,
     User,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnError {
+    BadElf,
+    ProgramTooLarge,
+    NoMemory,
 }
 
 static READY_QUEUE: SpinLock<VecDeque<ProcRef>> = SpinLock::new(VecDeque::new());
@@ -153,7 +165,7 @@ pub fn spawn_kernel(entry: KernelEntry) -> ProcRef {
 /// 但 PIT 定时器仍应能从 Ring 3 抢占它，并通过 TSS.rsp0 切回对应进程的内核栈。
 pub fn spawn_user(code: &[u8]) -> ProcRef {
     init();
-    assert!(code.len() <= PAGE_SIZE, "teaching user loader supports one code page");
+    assert!(code.len() <= PAGE_SIZE, "user loader supports one code page");
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
     let user_code_base = user_code_base(pid);
     let user_stack_top = user_stack_top(pid);
@@ -201,11 +213,10 @@ pub fn spawn_user(code: &[u8]) -> ProcRef {
 
     let user_stack_bottom = user_stack_top - USER_STACK_SIZE;
     for i in 0..(1 << USER_STACK_ORDER) {
-        page::map_into_page_table(
+        map_user_stack_page(
             pagetable,
-            VirtAddr::from((user_stack_bottom + i * PAGE_SIZE) as u64),
-            PhysAddr::from((ustack_phys + i * PAGE_SIZE) as u64),
-            EntryFlags::PRESENT | EntryFlags::WRITABLE | EntryFlags::USER | EntryFlags::NX,
+            user_stack_bottom + i * PAGE_SIZE,
+            ustack_phys + i * PAGE_SIZE,
         );
     }
 
@@ -242,12 +253,100 @@ pub fn spawn_user(code: &[u8]) -> ProcRef {
     proc_ref
 }
 
+pub fn spawn_elf(image: &[u8]) -> Result<ProcRef, SpawnError> {
+    init();
+    let parsed = elf::parse(image).map_err(|_| SpawnError::BadElf)?;
+    if parsed.load.file_size > PAGE_SIZE || parsed.load.mem_size > PAGE_SIZE {
+        return Err(SpawnError::ProgramTooLarge);
+    }
+
+    let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+    let user_stack_top = user_stack_top(pid);
+    let pagetable = page::create_user_page_table();
+    map_bootdata_identity(pagetable);
+
+    let (kstack_phys, code_phys, ustack_phys) = {
+        let mut buddy_guard = BUDDY_ALLOCATOR.lock();
+        let buddy = buddy_guard
+            .as_mut()
+            .expect("You must initialize buddy allocator before spawning a user task.");
+
+        let kstack_phys = buddy.allocate(KERNEL_STACK_ORDER).ok_or(SpawnError::NoMemory)?;
+        let code_phys = buddy.allocate(0).ok_or(SpawnError::NoMemory)?;
+        let ustack_phys = buddy.allocate(USER_STACK_ORDER).ok_or(SpawnError::NoMemory)?;
+
+        (kstack_phys, code_phys, ustack_phys)
+    };
+
+    unsafe {
+        let dst = (code_phys + KERNEL_VMA) as *mut u8;
+        core::ptr::write_bytes(dst, 0, PAGE_SIZE);
+        core::ptr::copy_nonoverlapping(
+            image[parsed.load.offset..].as_ptr(),
+            dst,
+            parsed.load.file_size,
+        );
+    }
+
+    page::map_into_page_table(
+        pagetable,
+        VirtAddr::from(parsed.load.virt_addr),
+        PhysAddr::from(code_phys as u64),
+        EntryFlags::PRESENT | EntryFlags::USER,
+    );
+
+    map_user_stack(pagetable, user_stack_top, ustack_phys);
+
+    let kstack_top = kstack_phys + KERNEL_VMA + KERNEL_STACK_SIZE;
+    let trap_frame = (kstack_top - core::mem::size_of::<TrapFrame>()) as *mut TrapFrame;
+    unsafe {
+        trap_frame.write(TrapFrame::new_user(parsed.entry, user_stack_top as u64));
+    }
+
+    let proc = Box::leak(Box::new(Proc {
+        pid,
+        state: ProcState::Ready,
+        context: Context {
+            rsp: align_down(trap_frame as usize, 16) as u64,
+            rip: user_task_bootstrap as *const () as u64,
+            ..Context::new()
+        },
+        pagetable,
+        kstack_phys,
+        kstack_top,
+        kind: ProcKind::User,
+        ticks_left: DEFAULT_TIME_SLICE_TICKS,
+        entry: None,
+        trap_frame: Some(trap_frame),
+        user_code_phys: Some(code_phys),
+        user_stack_phys: Some(ustack_phys),
+    }));
+
+    let proc_ref = ProcRef(proc as *mut Proc);
+    push_ready(proc_ref);
+    Ok(proc_ref)
+}
+
 pub fn current_proc() -> ProcRef {
     unsafe { read_current().expect("no current process; call task::proc::init first") }
 }
 
 pub fn yield_now() {
     unsafe { schedule() }
+}
+
+pub fn exit_current(_status: usize) -> ! {
+    unsafe {
+        trap::disable_interrupts();
+        if let Some(current) = read_current() {
+            (*current.as_ptr()).state = ProcState::Exited;
+        }
+        schedule();
+        trap::enable_interrupts();
+        loop {
+            trap::halt();
+        }
+    }
 }
 
 pub fn on_timer_tick() {
@@ -268,6 +367,26 @@ fn push_ready(proc_ref: ProcRef) {
         (*proc_ref.as_ptr()).state = ProcState::Ready;
     }
     READY_QUEUE.lock().push_back(proc_ref);
+}
+
+fn map_user_stack(pagetable: PhysAddr, stack_top: usize, stack_phys: usize) {
+    let stack_bottom = stack_top - USER_STACK_SIZE;
+    for i in 0..(1 << USER_STACK_ORDER) {
+        map_user_stack_page(
+            pagetable,
+            stack_bottom + i * PAGE_SIZE,
+            stack_phys + i * PAGE_SIZE,
+        );
+    }
+}
+
+fn map_user_stack_page(pagetable: PhysAddr, virt: usize, phys: usize) {
+    page::map_into_page_table(
+        pagetable,
+        VirtAddr::from(virt as u64),
+        PhysAddr::from(phys as u64),
+        EntryFlags::PRESENT | EntryFlags::WRITABLE | EntryFlags::USER | EntryFlags::NX,
+    );
 }
 
 fn map_bootdata_identity(pagetable: PhysAddr) {

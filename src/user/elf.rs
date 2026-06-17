@@ -9,6 +9,7 @@ const ET_EXEC: u16 = 2;
 const EM_X86_64: u16 = 62;
 const EV_CURRENT: u32 = 1;
 const ENTRY_BASE: u64 = 0x0000_0000_0040_0000;
+const ENTRY_STRIDE: u64 = 0x1000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElfError {
@@ -67,12 +68,16 @@ impl ProgramId {
         Self::ALL.into_iter().find(|program| program.name() == name)
     }
 
-    fn entry(self) -> u64 {
-        ENTRY_BASE + self as u64
+    pub fn entry(self) -> u64 {
+        ENTRY_BASE + self as u64 * ENTRY_STRIDE
     }
 
     fn from_entry(entry: u64) -> Option<Self> {
-        let id = entry.checked_sub(ENTRY_BASE)?;
+        let offset = entry.checked_sub(ENTRY_BASE)?;
+        if offset % ENTRY_STRIDE != 0 {
+            return None;
+        }
+        let id = offset / ENTRY_STRIDE;
         Self::ALL.into_iter().find(|program| *program as u64 == id)
     }
 }
@@ -163,7 +168,7 @@ pub fn parse(image: &[u8]) -> Result<ParsedElf, ElfError> {
 }
 
 pub fn build_program_image(program: ProgramId) -> Vec<u8> {
-    let payload = program.name().as_bytes();
+    let payload = user_program_code(program);
     let payload_offset = ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE;
     let mut image = alloc::vec![0; payload_offset + payload.len()];
 
@@ -197,8 +202,61 @@ pub fn build_program_image(program: ProgramId) -> Vec<u8> {
     write_u64(&mut image, ph + 40, payload.len() as u64);
     write_u64(&mut image, ph + 48, 0x1000);
 
-    image[payload_offset..].copy_from_slice(payload);
+    image[payload_offset..].copy_from_slice(&payload);
     image
+}
+
+fn user_program_code(program: ProgramId) -> Vec<u8> {
+    const SYS_EXIT: u32 = 3;
+    const SYS_WRITE: u32 = 6;
+    const STDOUT: u32 = 1;
+
+    let mut message = alloc::string::String::from("exec /bin/");
+    message.push_str(program.name());
+    message.push_str(" ok\r\n");
+    let message = message.into_bytes();
+
+    let mut code = Vec::new();
+
+    // mov eax, SYS_WRITE
+    code.push(0xb8);
+    code.extend_from_slice(&SYS_WRITE.to_le_bytes());
+
+    // mov edi, STDOUT
+    code.push(0xbf);
+    code.extend_from_slice(&STDOUT.to_le_bytes());
+
+    // lea rsi, [rip + message]
+    let lea_start = code.len();
+    code.extend_from_slice(&[0x48, 0x8d, 0x35, 0, 0, 0, 0]);
+    let lea_next = code.len();
+
+    // mov edx, message.len()
+    code.push(0xba);
+    code.extend_from_slice(&(message.len() as u32).to_le_bytes());
+
+    // syscall
+    code.extend_from_slice(&[0x0f, 0x05]);
+
+    // mov eax, SYS_EXIT
+    code.push(0xb8);
+    code.extend_from_slice(&SYS_EXIT.to_le_bytes());
+
+    // xor edi, edi
+    code.extend_from_slice(&[0x31, 0xff]);
+
+    // syscall
+    code.extend_from_slice(&[0x0f, 0x05]);
+
+    // jmp $，如果 exit 尚未接通，不继续执行随机内存。
+    code.extend_from_slice(&[0xeb, 0xfe]);
+
+    let message_offset = code.len();
+    let displacement = message_offset as isize - lea_next as isize;
+    code[lea_start + 3..lea_start + 7].copy_from_slice(&(displacement as i32).to_le_bytes());
+    code.extend_from_slice(&message);
+
+    code
 }
 
 pub fn install_programs(fs: &mut RamFs) {
@@ -250,7 +308,8 @@ mod tests {
 
         assert_eq!(parsed.program, ProgramId::Ls);
         assert_eq!(parsed.entry, ProgramId::Ls.entry());
-        assert_eq!(&image[parsed.load.offset..parsed.load.offset + parsed.load.file_size], b"ls");
+        assert_eq!(parsed.load.virt_addr, ProgramId::Ls.entry());
+        assert!(parsed.load.file_size > 16);
     }
 
     #[test]

@@ -102,6 +102,7 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
     syscall::init();
     syscall::init_runtime_fs();
     syscall::set_console_write(serial_console_write);
+    syscall::set_process_hooks(exec_program, task::proc::exit_current);
     trap::idt::init();
     task::proc::init();
     let syscall_smoke = user::syscall_write_smoke_program();
@@ -139,6 +140,11 @@ fn alloc_error(layout: Layout) -> ! {
 
 fn serial_console_write(buf: &[u8]) {
     stdio::serial_write(buf);
+}
+
+fn exec_program(image: &[u8]) -> syscall::SysResult {
+    let proc_ref = task::proc::spawn_elf(image).map_err(|_| syscall::SysError::InvalidArgument)?;
+    Ok(proc_ref.pid() as usize)
 }
 
 struct Shell {
@@ -242,11 +248,42 @@ impl Shell {
                 self.foreground_job(words.get(1).copied());
                 true
             }
+            "run" | "exec" => {
+                self.run_elf(words.get(1).copied());
+                true
+            }
             "sleep" | "count" => {
                 self.start_long_job(command, &words, background);
                 true
             }
             _ => false,
+        }
+    }
+
+    fn run_elf(&mut self, program: Option<&str>) {
+        let Some(program) = program else {
+            stdio::serial_write(b"usage: run <program>\r\n");
+            return;
+        };
+
+        let image = syscall::with_runtime_fs(|fs| {
+            let mut path = String::from("/bin/");
+            path.push_str(program.trim_start_matches("/bin/"));
+            fs.read(&path)
+        });
+
+        let Some(Ok(image)) = image else {
+            stdio::serial_write(b"run: executable not found\r\n");
+            return;
+        };
+
+        match task::proc::spawn_elf(&image) {
+            Ok(proc_ref) => {
+                stdio::serial_write(format!("started pid {}\r\n", proc_ref.pid()).as_bytes());
+            }
+            Err(_) => {
+                stdio::serial_write(b"run: invalid executable\r\n");
+            }
         }
     }
 
