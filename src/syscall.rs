@@ -92,6 +92,7 @@ static mut __SYSCALL_USER_RSP: u64 = 0;
 
 static KERNEL_FS: SpinLock<Option<RamFs>> = SpinLock::new(None);
 static KERNEL_FD_TABLE: SpinLock<Option<fd::FileDescriptorTable>> = SpinLock::new(None);
+static CONSOLE_WRITE: SpinLock<Option<fn(&[u8])>> = SpinLock::new(None);
 
 unsafe extern "C" {
     fn __syscall_entry();
@@ -126,6 +127,10 @@ pub fn init() {
 pub fn init_runtime_fs() {
     KERNEL_FS.lock().replace(RamFs::new());
     KERNEL_FD_TABLE.lock().replace(fd::FileDescriptorTable::new());
+}
+
+pub fn set_console_write(writer: fn(&[u8])) {
+    CONSOLE_WRITE.lock().replace(writer);
 }
 
 unsafe fn rdmsr(msr: u32) -> u64 {
@@ -233,9 +238,11 @@ fn syscall_write(fd: usize, buf_ptr: usize, len: usize) -> SysResult {
         return Err(SysError::InvalidArgument);
     }
     let buf = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len) };
-    with_fs(|fs| {
+    let written = with_fs(|fs| {
         with_fd_table(|table| SyscallTable::write(fs, table, fd, buf))
-    })
+    })?;
+    mirror_console_write(fd, &buf[..written]);
+    Ok(written)
 }
 
 fn with_fs(f: impl FnOnce(&mut RamFs) -> SysResult) -> SysResult {
@@ -248,6 +255,20 @@ fn with_fd_table(f: impl FnOnce(&mut fd::FileDescriptorTable) -> SysResult) -> S
     let mut guard = KERNEL_FD_TABLE.lock();
     let table = guard.as_mut().ok_or(SysError::Unsupported)?;
     f(table)
+}
+
+fn mirror_console_write(fd: usize, buf: &[u8]) {
+    if fd != 1 && fd != 2 {
+        return;
+    }
+
+    // stdout/stderr 的主要语义仍然是写入 fd 表。这里额外支持一个由内核启动代码
+    // 注册的 console hook，方便直接在串口上观察用户态 `write(1/2, ...)` 是否
+    // 真的经过了 syscall 入口。hook 放在 syscall 模块外部注册，是为了让本文件
+    // 同时能被 lib 测试和内核二进制复用。
+    if let Some(writer) = *CONSOLE_WRITE.lock() {
+        writer(buf);
+    }
 }
 
 fn decode_open_flags(raw: usize) -> fd::OpenFlags {

@@ -97,9 +97,11 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
     trap::gdt::init();
     syscall::init();
     syscall::init_runtime_fs();
+    syscall::set_console_write(serial_console_write);
     trap::idt::init();
     task::proc::init();
-    task::proc::spawn_user(&[0xeb, 0xfe]);
+    let syscall_smoke = user::syscall_write_smoke_program();
+    task::proc::spawn_user(&syscall_smoke);
     task::proc::spawn_user(&[0xeb, 0xfe]);
     trap::pic::init();
     stdio::init_serial_interrupts();
@@ -123,4 +125,10 @@ fn panic(_info: &PanicInfo) -> ! {
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
     panic!("allocation error: {:?}", layout);
+}
+
+fn serial_console_write(buf: &[u8]) {
+    for &byte in buf {
+        unsafe { stdio::serial_putc(byte); }
+    }
 }
