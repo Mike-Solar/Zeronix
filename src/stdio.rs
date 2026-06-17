@@ -32,9 +32,9 @@ pub fn _printk(level:LogLevel, arguments: Arguments){
         LogLevel::Debug => "[DEBUG] ",
     };
 
-    Stdout.write_str(prefix);
-    Stdout.write_fmt(arguments);
-    Stdout.write_str("\n");
+    let _ = Stdout.write_str(prefix);
+    let _ = Stdout.write_fmt(arguments);
+    let _ = Stdout.write_str("\n");
 
 }
 struct Stdout;
@@ -48,7 +48,7 @@ impl Write for Stdout {
 }
 fn should_print(log_level: LogLevel) -> bool{
     unsafe {
-        if log_level as usize > CURRENT_LEVEL as usize {
+        if log_level as usize >= CURRENT_LEVEL as usize {
             return true;
         }
         false
@@ -61,7 +61,7 @@ pub unsafe fn serial_puts(text: &str){
         if c == 0 {
             break;
         }
-        serial_putc(c);
+        unsafe { serial_putc(c) };
     }
 }
 
@@ -71,22 +71,26 @@ pub unsafe fn serial_putc(c: u8) {
     // 等待发送缓冲区为空
     loop {
         let lsr: u8;
-        asm!(
-        "in al, dx",           // 从 LSR 端口读取状态
-        out("al") lsr,
-        in("dx") COM1_LSR,
-        options(nomem, nostack)
-        );
+        unsafe {
+            asm!(
+            "in al, dx",           // 从 LSR 端口读取状态
+            out("al") lsr,
+            in("dx") COM1_LSR,
+            options(nomem, nostack)
+            );
+        }
         if lsr & LSR_THRE != 0 {
             break;
         }
     }
 
     // 输出字符
-    asm!(
-    "out dx, al",
-    in("dx") COM1_DATA,
-    in("al") c,
-    options(nomem, nostack)
-    );
+    unsafe {
+        asm!(
+        "out dx, al",
+        in("dx") COM1_DATA,
+        in("al") c,
+        options(nomem, nostack)
+        );
+    }
 }

@@ -3,11 +3,16 @@ name = "zeronix"
 version = "0.1.0"
 edition = "2024"
 
-[build]
-target = "x86_64-unknown-none"
-rustflags = ["-C", "link-arg=-Tlinker.ld"]
-
 [dependencies]
+multiboot2 = { version = "0.24.1", default-features = false }
+bitflags = "2.13.0"
+
+[[bin]]
+name = "zeronix"
+test = false
 
 [profile.dev]
+panic = "abort"
+
+[profile.release]
 panic = "abort"
