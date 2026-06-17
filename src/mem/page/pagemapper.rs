@@ -3,7 +3,11 @@ use crate::mem::page::{PageTable, PageTableEntry, EntryFlags};
 use crate::mem::page::pagealloc::BuddyAllocator;
 
 pub const KERNEL_VMA: usize = 0xFFFF800000000000;
-pub const EARLY_PAGE_TABLE_LIMIT: usize = 1 << 30;
+/// The bootstrap page tables in `boot.S` map only the first 8 MiB with
+/// 2 MiB pages. Until the new page table is complete and CR3 is switched,
+/// every page-table frame we touch through `KERNEL_VMA + phys` must live
+/// inside that bootstrap mapping.
+pub const EARLY_PAGE_TABLE_LIMIT: usize = 8 * 1024 * 1024;
 
 /// 页表映射器
 pub struct Mapper<'a> {

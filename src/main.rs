@@ -18,6 +18,8 @@ mod mem;
 pub mod trap;
 pub mod lock;
 
+use alloc::vec;
+use alloc::vec::Vec;
 use core::alloc::Layout;
 use core::panic::PanicInfo;
 use multiboot2::BootInformation;
@@ -25,7 +27,7 @@ use stdio::LogLevel;
 use mem::page::pagealloc::*;
 use crate::lock::spin_lock::SpinLock;
 use crate::mem::page::{init_kernel_page_table, switch_cr3};
-
+use crate::trap::pic::pic_remap;
 
 pub static BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
 // 课程设计：假设最大支持 512MB = 131072 页
@@ -93,9 +95,21 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
     unsafe {switch_cr3(addr);}
     trap::gdt::init();
     trap::idt::init();
+    pic_remap(32, 40);
 
     printk!(LogLevel::Info, "Zeronix boot successfully!");
-    loop {}
+    loop {
+        let mut vec = vec![0; 256];
+        printk!(LogLevel::Info, "Vector allocated successfully!");
+        for i in 0..256 {
+            vec[i]=i;
+        }
+        for i in 0..255 {
+            printk!(LogLevel::Info, "vec[{}]={}", i, vec[i]);
+        }
+        drop(vec);
+        printk!(LogLevel::Info, "Vector drop successfully!");
+    }
 }
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {

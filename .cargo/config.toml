@@ -1,6 +1,9 @@
 [build]
 target = "x86_64-unknown-none"
 
+[alias]
+kbuild = "build -Zbuild-std=core,alloc --bin zeronix"
+
 [target.x86_64-unknown-none]
 rustflags = [
     "-C", "relocation-model=static",
