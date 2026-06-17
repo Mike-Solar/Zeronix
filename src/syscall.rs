@@ -1,5 +1,7 @@
 use crate::fs::ramfs::{FsError, RamFs};
 
+pub mod fd;
+
 pub type SysResult = Result<usize, SysError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -11,6 +13,8 @@ pub enum SysError {
     NotDir,
     IsDir,
     NotEmpty,
+    BadFd,
+    Permission,
     Unsupported,
 }
 
@@ -52,6 +56,41 @@ pub enum SyscallNumber {
 pub struct SyscallTable;
 
 impl SyscallTable {
+    pub fn open(
+        fs: &mut RamFs,
+        table: &mut fd::FileDescriptorTable,
+        path: &str,
+        flags: fd::OpenFlags,
+    ) -> SysResult {
+        table.open(fs, path, flags).map_err(Into::into)
+    }
+
+    pub fn read(
+        fs: &RamFs,
+        table: &mut fd::FileDescriptorTable,
+        fd: usize,
+        buf: &mut [u8],
+    ) -> SysResult {
+        table.read(fs, fd, buf).map_err(Into::into)
+    }
+
+    pub fn write(
+        fs: &mut RamFs,
+        table: &mut fd::FileDescriptorTable,
+        fd: usize,
+        buf: &[u8],
+    ) -> SysResult {
+        table.write(fs, fd, buf).map_err(Into::into)
+    }
+
+    pub fn close(table: &mut fd::FileDescriptorTable, fd: usize) -> SysResult {
+        table.close(fd).map_err(Into::into)
+    }
+
+    pub fn dup2(table: &mut fd::FileDescriptorTable, old_fd: usize, new_fd: usize) -> SysResult {
+        table.dup2(old_fd, new_fd).map_err(Into::into)
+    }
+
     pub fn unlink(fs: &mut RamFs, path: &str) -> SysResult {
         fs.remove(path)?;
         Ok(0)
@@ -84,11 +123,34 @@ impl SyscallTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::syscall::fd::{FileDescriptorTable, OpenFlags};
 
     #[test]
     fn fs_errors_map_to_sys_errors() {
         assert_eq!(SysError::from(FsError::NotFound), SysError::NoEntry);
         assert_eq!(SysError::from(FsError::AlreadyExists), SysError::Exists);
         assert_eq!(SysError::from(FsError::NotDirectory), SysError::NotDir);
+    }
+
+    #[test]
+    fn table_syscalls_read_and_write_files() {
+        let mut fs = RamFs::new();
+        let mut table = FileDescriptorTable::new();
+
+        let fd = SyscallTable::open(
+            &mut fs,
+            &mut table,
+            "/home/msg",
+            OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNC,
+        )
+        .unwrap();
+        assert_eq!(SyscallTable::write(&mut fs, &mut table, fd, b"hello").unwrap(), 5);
+        SyscallTable::close(&mut table, fd).unwrap();
+
+        let fd = SyscallTable::open(&mut fs, &mut table, "/home/msg", OpenFlags::READ).unwrap();
+        let mut buf = [0u8; 8];
+        let n = SyscallTable::read(&fs, &mut table, fd, &mut buf).unwrap();
+
+        assert_eq!(&buf[..n], b"hello");
     }
 }
