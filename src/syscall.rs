@@ -142,14 +142,9 @@ pub fn with_runtime_fs<T>(f: impl FnOnce(&mut RamFs) -> T) -> Option<T> {
 }
 
 fn seed_runtime_fs(fs: &mut RamFs) {
-    // 这些文件暂时是教学占位符：shell 已经把命令语义实现出来了，后续有 ELF
-    // loader 后，可以把它们替换成真正的用户态程序镜像，并由 exec 装载。
-    let programs: &[&str] = &["shell", "ls", "rm", "mv", "cp", "touch", "cat", "echo"];
-    for program in programs {
-        let mut path = alloc::string::String::from("/bin/");
-        path.push_str(program);
-        let _ = fs.write(&path, b"builtin\n");
-    }
+    // /bin 里的文件使用 ELF64 格式。当前 shell 先解析 ELF 并按程序 ID 分发，
+    // 后续 exec 可以复用同一份解析结果去映射 LOAD 段。
+    crate::user::elf::install_programs(fs);
     let _ = fs.write("/home/readme.txt", b"Welcome to Zeronix shell.\n");
 }
 

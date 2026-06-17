@@ -2,12 +2,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::fs::ramfs::{FsError, RamFs};
+use crate::user::elf::{self, ProgramId};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandError {
     Empty,
     Unknown,
     MissingArgument,
+    BadExecutable,
     Fs(FsError),
 }
 
@@ -92,15 +94,28 @@ pub fn run_command(fs: &mut RamFs, line: &str, stdin: &[u8]) -> Result<CommandOu
 }
 
 fn dispatch(fs: &mut RamFs, words: &[&str], stdin: &[u8]) -> Result<CommandOutput, CommandError> {
-    match words.first().copied().ok_or(CommandError::Empty)? {
-        "ls" => cmd_ls(fs, words),
-        "rm" => cmd_rm(fs, words),
-        "mv" => cmd_mv(fs, words),
-        "cp" => cmd_cp(fs, words),
-        "touch" => cmd_touch(fs, words),
-        "cat" => cmd_cat(fs, words, stdin),
-        "echo" => cmd_echo(words),
-        _ => Err(CommandError::Unknown),
+    match load_program(fs, words.first().copied().ok_or(CommandError::Empty)?)? {
+        ProgramId::Ls => cmd_ls(fs, words),
+        ProgramId::Rm => cmd_rm(fs, words),
+        ProgramId::Mv => cmd_mv(fs, words),
+        ProgramId::Cp => cmd_cp(fs, words),
+        ProgramId::Touch => cmd_touch(fs, words),
+        ProgramId::Cat => cmd_cat(fs, words, stdin),
+        ProgramId::Echo => cmd_echo(words),
+        ProgramId::Sleep | ProgramId::Count | ProgramId::Shell => Err(CommandError::Unknown),
+    }
+}
+
+pub fn load_program(fs: &RamFs, name: &str) -> Result<ProgramId, CommandError> {
+    let program = ProgramId::from_name(name).ok_or(CommandError::Unknown)?;
+    let mut path = String::from("/bin/");
+    path.push_str(program.name());
+    let image = fs.read(&path)?;
+    let parsed = elf::parse(&image).map_err(|_| CommandError::BadExecutable)?;
+    if parsed.program == program {
+        Ok(program)
+    } else {
+        Err(CommandError::BadExecutable)
     }
 }
 
@@ -173,9 +188,15 @@ fn cmd_echo(words: &[&str]) -> Result<CommandOutput, CommandError> {
 mod tests {
     use super::*;
 
+    fn fs_with_programs() -> RamFs {
+        let mut fs = RamFs::new();
+        crate::user::elf::install_programs(&mut fs);
+        fs
+    }
+
     #[test]
     fn implements_basic_file_commands() {
-        let mut fs = RamFs::new();
+        let mut fs = fs_with_programs();
 
         run_command(&mut fs, "touch /home/a", b"").unwrap();
         run_command(&mut fs, "echo hello > /home/a", b"").unwrap();
@@ -200,7 +221,7 @@ mod tests {
 
     #[test]
     fn supports_stdout_append_and_stdin_redirect() {
-        let mut fs = RamFs::new();
+        let mut fs = fs_with_programs();
 
         run_command(&mut fs, "echo first > /home/log", b"").unwrap();
         run_command(&mut fs, "echo second >> /home/log", b"").unwrap();
@@ -217,7 +238,7 @@ mod tests {
 
     #[test]
     fn ls_lists_directory_entries() {
-        let mut fs = RamFs::new();
+        let mut fs = fs_with_programs();
         run_command(&mut fs, "touch /home/z", b"").unwrap();
         run_command(&mut fs, "touch /home/a", b"").unwrap();
 

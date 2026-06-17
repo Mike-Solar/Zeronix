@@ -1,10 +1,11 @@
 use alloc::vec::Vec;
 
 pub mod commands;
+pub mod elf;
 
 /// 生成一个最小的用户态 syscall 烟测程序。
 ///
-/// 当前教学内核还没有 ELF 装载器，也没有用户态 libc，所以这里直接生成一小段
+/// 当前还没有 ELF 装载器，也没有用户态 libc，所以这里直接生成一小段
 /// x86_64 机器码交给 `spawn_user` 映射到用户代码页。程序逻辑等价于：
 ///
 /// ```text

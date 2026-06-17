@@ -3,7 +3,9 @@
 #![feature(alloc_error_handler)]
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 mod stdio;
 mod list;
@@ -33,7 +35,7 @@ use crate::lock::spin_lock::SpinLock;
 use crate::mem::page::{init_kernel_page_table, switch_cr3};
 
 pub static BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
-// 课程设计：假设最大支持 512MB = 131072 页
+// 假设最大支持 512MB = 131072 页
 // PageInfo 8 字节 * 131072 = 1MB，放在 .bss 中
 const MAX_SUPPORTED_PAGES: usize = 131072;
 
@@ -118,6 +120,7 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
     shell.print_prompt();
     loop {
         unsafe { trap::halt(); }
+        shell.poll_jobs();
         while let Some(byte) = stdio::read_serial_byte() {
             shell.handle_byte(byte);
         }
@@ -140,12 +143,20 @@ fn serial_console_write(buf: &[u8]) {
 
 struct Shell {
     line: String,
+    jobs: Vec<Job>,
+    active: Option<Job>,
+    next_job_id: u64,
+    last_second: u64,
 }
 
 impl Shell {
     fn new() -> Self {
         Self {
             line: String::new(),
+            jobs: Vec::new(),
+            active: None,
+            next_job_id: 1,
+            last_second: 0,
         }
     }
 
@@ -154,6 +165,13 @@ impl Shell {
     }
 
     fn handle_byte(&mut self, byte: u8) {
+        if self.active.is_some() {
+            if byte == 26 {
+                self.suspend_active_job();
+            }
+            return;
+        }
+
         match byte {
             b'\r' | b'\n' => {
                 stdio::serial_write(b"\r\n");
@@ -175,12 +193,25 @@ impl Shell {
     }
 
     fn run_line(&mut self) {
-        let line = self.line.trim();
+        let mut line = self.line.trim().to_string();
         if line.is_empty() {
             return;
         }
 
-        let Some(result) = syscall::with_runtime_fs(|fs| user::commands::run_command(fs, line, b"")) else {
+        let background = line.ends_with('&');
+        if background {
+            line.pop();
+            line = line.trim_end().to_string();
+            if line.is_empty() {
+                return;
+            }
+        }
+
+        if self.run_shell_command(&line, background) {
+            return;
+        }
+
+        let Some(result) = syscall::with_runtime_fs(|fs| user::commands::run_command(fs, &line, b"")) else {
             stdio::serial_write(b"shell: filesystem is not initialized\r\n");
             return;
         };
@@ -195,4 +226,189 @@ impl Shell {
             }
         }
     }
+
+    fn run_shell_command(&mut self, line: &str, background: bool) -> bool {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let Some(command) = words.first().copied() else {
+            return true;
+        };
+
+        match command {
+            "jobs" => {
+                self.print_jobs();
+                true
+            }
+            "fg" => {
+                self.foreground_job(words.get(1).copied());
+                true
+            }
+            "sleep" | "count" => {
+                self.start_long_job(command, &words, background);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn start_long_job(&mut self, command: &str, words: &[&str], background: bool) {
+        let Some(program_ok) = syscall::with_runtime_fs(|fs| user::commands::load_program(fs, command)) else {
+            stdio::serial_write(b"shell: filesystem is not initialized\r\n");
+            return;
+        };
+        if program_ok.is_err() {
+            stdio::serial_write(b"shell: executable not found\r\n");
+            return;
+        }
+
+        let seconds = words
+            .get(1)
+            .and_then(|value| parse_u32(value))
+            .unwrap_or(5)
+            .max(1);
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        let job = Job {
+            id,
+            name: command.to_string(),
+            kind: if command == "count" {
+                JobKind::Count
+            } else {
+                JobKind::Sleep
+            },
+            remaining: seconds,
+            total: seconds,
+            background,
+        };
+
+        if background {
+            stdio::serial_write(format!("[{}] {}\r\n", job.id, job.name).as_bytes());
+            self.jobs.push(job);
+        } else {
+            stdio::serial_write(format!("{} running; Ctrl-Z sends it to background\r\n", job.name).as_bytes());
+            self.active = Some(job);
+        }
+    }
+
+    fn poll_jobs(&mut self) {
+        let seconds = trap::idt::timer_ticks() / 100;
+        while self.last_second < seconds {
+            self.last_second += 1;
+            self.tick_one_second();
+        }
+    }
+
+    fn tick_one_second(&mut self) {
+        if let Some(mut job) = self.active.take() {
+            tick_job(&mut job);
+            if job.remaining == 0 {
+                stdio::serial_write(format!("{} done\r\n", job.name).as_bytes());
+                self.print_prompt();
+            } else {
+                self.active = Some(job);
+            }
+        }
+
+        let mut index = 0;
+        while index < self.jobs.len() {
+            tick_job(&mut self.jobs[index]);
+            if self.jobs[index].remaining == 0 {
+                let job = self.jobs.remove(index);
+                stdio::serial_write(format!("\r\n[{}] done {}\r\n", job.id, job.name).as_bytes());
+                if self.active.is_none() {
+                    self.print_prompt();
+                }
+            } else {
+                index += 1;
+            }
+        }
+    }
+
+    fn suspend_active_job(&mut self) {
+        let Some(mut job) = self.active.take() else {
+            return;
+        };
+        job.background = true;
+        stdio::serial_write(format!("\r\n[{}] stopped {}\r\n", job.id, job.name).as_bytes());
+        self.jobs.push(job);
+        self.print_prompt();
+    }
+
+    fn print_jobs(&self) {
+        if self.jobs.is_empty() {
+            stdio::serial_write(b"no background jobs\r\n");
+            return;
+        }
+        for job in &self.jobs {
+            stdio::serial_write(
+                format!("[{}] {} {}s remaining\r\n", job.id, job.name, job.remaining).as_bytes(),
+            );
+        }
+    }
+
+    fn foreground_job(&mut self, id: Option<&str>) {
+        let Some(id) = id.and_then(parse_u64) else {
+            stdio::serial_write(b"usage: fg <job-id>\r\n");
+            return;
+        };
+
+        let Some(index) = self.jobs.iter().position(|job| job.id == id) else {
+            stdio::serial_write(b"fg: no such job\r\n");
+            return;
+        };
+
+        let mut job = self.jobs.remove(index);
+        job.background = false;
+        stdio::serial_write(format!("{} foreground\r\n", job.name).as_bytes());
+        self.active = Some(job);
+    }
+}
+
+#[derive(Clone)]
+struct Job {
+    id: u64,
+    name: String,
+    kind: JobKind,
+    remaining: u32,
+    total: u32,
+    background: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JobKind {
+    Sleep,
+    Count,
+}
+
+fn tick_job(job: &mut Job) {
+    if job.remaining == 0 {
+        return;
+    }
+    job.remaining -= 1;
+
+    if job.kind == JobKind::Count {
+        let current = job.total - job.remaining;
+        stdio::serial_write(format!("{}: {}\r\n", job.name, current).as_bytes());
+    }
+}
+
+fn parse_u32(text: &str) -> Option<u32> {
+    let mut value = 0u32;
+    for byte in text.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as u32)?;
+    }
+    Some(value)
+}
+
+fn parse_u64(text: &str) -> Option<u64> {
+    let mut value = 0u64;
+    for byte in text.bytes() {
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add((byte - b'0') as u64)?;
+    }
+    Some(value)
 }

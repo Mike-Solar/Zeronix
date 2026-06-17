@@ -183,7 +183,7 @@ pub fn spawn_user(code: &[u8]) -> ProcRef {
         let dst = (code_phys + KERNEL_VMA) as *mut u8;
         core::ptr::write_bytes(dst, 0, PAGE_SIZE);
         if code.is_empty() {
-            // 空程序直接执行零字节没有教学意义。这里放一个 `jmp $`，让进程
+            // 空程序直接执行零字节没有意义。这里放一个 `jmp $`，让进程
             // 稳定停在用户态，方便验证 Ring 3 入口和时钟抢占。
             *dst.add(0) = 0xeb;
             *dst.add(1) = 0xfe;

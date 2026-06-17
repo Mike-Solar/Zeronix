@@ -96,6 +96,10 @@ type Handler = unsafe extern "C" fn();
 static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
 static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
+pub fn timer_ticks() -> u64 {
+    TIMER_TICKS.load(Ordering::Relaxed)
+}
+
 pub fn init() {
     init_entries();
     load();
