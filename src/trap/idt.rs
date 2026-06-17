@@ -262,10 +262,16 @@ pub extern "C" fn __irq_handler(vector: u64) {
             if ticks % 100 == 0 {
                 printk!(LogLevel::Info, "timer tick {}", ticks);
             }
+            pic::end_of_interrupt(irq);
+            crate::task::proc::on_timer_tick();
+            return;
         }
         1 => {
             let scancode = unsafe { crate::trap::inb(0x60) };
             printk!(LogLevel::Info, "keyboard scancode {:#x}", scancode);
+        }
+        4 => {
+            crate::stdio::handle_serial_rx_interrupt();
         }
         _ => {
             printk!(LogLevel::Warning, "unexpected IRQ {} vector {}", irq, vector);

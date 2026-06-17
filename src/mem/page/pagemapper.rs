@@ -3,10 +3,10 @@ use crate::mem::page::{PageTable, PageTableEntry, EntryFlags};
 use crate::mem::page::pagealloc::BuddyAllocator;
 
 pub const KERNEL_VMA: usize = 0xFFFF800000000000;
-/// The bootstrap page tables in `boot.S` map only the first 8 MiB with
-/// 2 MiB pages. Until the new page table is complete and CR3 is switched,
-/// every page-table frame we touch through `KERNEL_VMA + phys` must live
-/// inside that bootstrap mapping.
+/// `boot.S` 的启动页表只用 2MiB 大页映射了低 8MiB。
+///
+/// 在新的页表构造完成并切换 CR3 之前，所有需要通过 `KERNEL_VMA + phys`
+/// 立即访问的页表页都必须落在这段启动映射内，否则清零页表页时会直接 #PF。
 pub const EARLY_PAGE_TABLE_LIMIT: usize = 8 * 1024 * 1024;
 
 /// 页表映射器
@@ -36,19 +36,31 @@ impl<'a> Mapper<'a> {
         let pdpt_idx = (v >> 30) & 0x1FF;
         let pd_idx = (v >> 21) & 0x1FF;
         let pt_idx = (v >> 12) & 0x1FF;
+        let table_flags = if flags.contains(EntryFlags::USER) {
+            EntryFlags::PRESENT | EntryFlags::WRITABLE | EntryFlags::USER
+        } else {
+            EntryFlags::PRESENT | EntryFlags::WRITABLE
+        };
 
         let pdpt = Mapper::<'a>::get_or_create_table(self.buddy, 
-                                                     self.pml4.entry_mut(pml4_idx));
+                                                     self.pml4.entry_mut(pml4_idx),
+                                                     table_flags);
         let pd = Mapper::<'a>::get_or_create_table(self.buddy,
-                                                   pdpt.entry_mut(pdpt_idx));
+                                                   pdpt.entry_mut(pdpt_idx),
+                                                   table_flags);
         let pt = Mapper::<'a>::get_or_create_table(self.buddy, 
-                                                   pd.entry_mut(pd_idx));
+                                                   pd.entry_mut(pd_idx),
+                                                   table_flags);
 
         pt.entry_mut(pt_idx).set_addr(phys, flags | EntryFlags::PRESENT);
     }
 
     /// 获取下级页表，如果不存在则分配新页并清零
-    fn get_or_create_table(buddy: &mut BuddyAllocator, entry: &mut PageTableEntry) 
+    fn get_or_create_table(
+        buddy: &mut BuddyAllocator,
+        entry: &mut PageTableEntry,
+        table_flags: EntryFlags,
+    )
         -> &'a mut PageTable {
         if !entry.is_present() {
             // 分配一个物理页作为新页表
@@ -57,11 +69,16 @@ impl<'a> Mapper<'a> {
             let frame_phys = PhysAddr::from(frame as u64);
 
             // 设置上级 entry：指向新页表，可读写
-            entry.set_addr(frame_phys, EntryFlags::PRESENT | EntryFlags::WRITABLE);
+            entry.set_addr(frame_phys, table_flags);
 
             // 清零新页表（必须！否则硬件读到垃圾数据会崩溃）
             let table_virt = Self::phys_to_virt(frame_phys) as *mut PageTable;
             unsafe { (*table_virt).entries.fill(PageTableEntry::new()) };
+        } else {
+            // x86_64 会在每一级页表都检查 U/S 位。低半区用户映射如果复用
+            // 已存在的中间页表项，也必须把中间项提升为 USER；否则即使最终
+            // PTE 带 U/S=1，Ring 3 访问仍然会 #PF。
+            entry.add_flags(table_flags);
         }
 
         let table_phys = entry.addr();

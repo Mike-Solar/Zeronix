@@ -15,6 +15,7 @@ unsafe impl<T: Send> Sync for SpinLock<T> {}
 
 pub struct SpinLockGuard<'a, T> {
     lock: &'a SpinLock<T>,
+    interrupts_were_enabled: bool,
 }
 
 impl<T> SpinLock<T> {
@@ -26,26 +27,47 @@ impl<T> SpinLock<T> {
     }
 
     pub fn lock(&self) -> SpinLockGuard<'_, T> {
-        // TODO: 关闭中断
+        let interrupts_were_enabled = interrupts_enabled();
+        unsafe { disable_interrupts(); }
+
         loop {
-            if let Ok(guard) = self.try_lock() {
-                return guard;
+            if self
+                .locked
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return SpinLockGuard {
+                    lock: self,
+                    interrupts_were_enabled,
+                };
             }
             spin_loop();
         }
     }
 
     pub fn try_lock(&self) -> Result<SpinLockGuard<'_, T>, ()> {
-        // TODO: 关闭中断
-        self.locked
+        let interrupts_were_enabled = interrupts_enabled();
+        unsafe { disable_interrupts(); }
+
+        match self
+            .locked
             .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
-            .map(|_| SpinLockGuard { lock: self })
-            .map_err(|_| ())
+        {
+            Ok(_) => Ok(SpinLockGuard {
+                lock: self,
+                interrupts_were_enabled,
+            }),
+            Err(_) => {
+                if interrupts_were_enabled {
+                    unsafe { enable_interrupts(); }
+                }
+                Err(())
+            }
+        }
     }
 
     pub fn unlock(&self) {
         self.locked.store(false, Ordering::Release);
-        // TODO：恢复中断状态
     }
 }
 
@@ -66,8 +88,50 @@ impl<T> DerefMut for SpinLockGuard<'_, T> {
 impl<T> Drop for SpinLockGuard<'_, T> {
     fn drop(&mut self) {
         self.lock.unlock();
+        if self.interrupts_were_enabled {
+            unsafe { enable_interrupts(); }
+        }
     }
 }
+
+#[cfg(target_os = "none")]
+fn interrupts_enabled() -> bool {
+    let flags: usize;
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "pop {}",
+            out(reg) flags,
+            options(nomem, preserves_flags),
+        );
+    }
+    flags & (1 << 9) != 0
+}
+
+#[cfg(not(target_os = "none"))]
+fn interrupts_enabled() -> bool {
+    false
+}
+
+#[cfg(target_os = "none")]
+unsafe fn disable_interrupts() {
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+unsafe fn disable_interrupts() {}
+
+#[cfg(target_os = "none")]
+unsafe fn enable_interrupts() {
+    unsafe {
+        core::arch::asm!("sti", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[cfg(not(target_os = "none"))]
+unsafe fn enable_interrupts() {}
 
 #[cfg(test)]
 mod tests {

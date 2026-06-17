@@ -40,6 +40,25 @@ pub unsafe fn enable_interrupts() {
     }
 }
 
+pub unsafe fn disable_interrupts() {
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack, preserves_flags));
+    }
+}
+
+pub fn interrupts_enabled() -> bool {
+    let flags: usize;
+    unsafe {
+        core::arch::asm!(
+            "pushfq",
+            "pop {}",
+            out(reg) flags,
+            options(nomem, preserves_flags),
+        );
+    }
+    flags & (1 << 9) != 0
+}
+
 pub unsafe fn halt() {
     unsafe {
         core::arch::asm!("hlt", options(nomem, nostack, preserves_flags));

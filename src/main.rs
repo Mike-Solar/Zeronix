@@ -15,8 +15,12 @@ unsafe extern "C" {
     static _bootdata_end: usize;
 }
 mod mem;
-pub mod trap;
-pub mod lock;
+mod fs;
+mod syscall;
+mod trap;
+mod lock;
+mod task;
+mod user;
 
 use core::alloc::Layout;
 use core::panic::PanicInfo;
@@ -92,9 +96,14 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
     unsafe {switch_cr3(addr);}
     trap::gdt::init();
     trap::idt::init();
+    task::proc::init();
+    task::proc::spawn_user(&[0xeb, 0xfe]);
+    task::proc::spawn_user(&[0xeb, 0xfe]);
     trap::pic::init();
+    stdio::init_serial_interrupts();
     trap::pic::unmask_irq(0);
     trap::pic::unmask_irq(1);
+    trap::pic::unmask_irq(4);
     trap::pit::init_100hz();
     unsafe { trap::enable_interrupts(); }
 

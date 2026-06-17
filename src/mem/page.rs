@@ -1,6 +1,8 @@
 pub mod pagealloc;
 pub mod pagemapper;
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 use crate::mem::{MemoryAddress, PhysAddr, VirtAddr};
 
 unsafe extern "C"{
@@ -36,6 +38,11 @@ impl PageTableEntry {
     pub fn flags(&self) -> EntryFlags {
         EntryFlags::from_bits_truncate(self.0)
     }
+
+    pub fn add_flags(&mut self, flags: EntryFlags) {
+        self.0 |= flags.bits();
+    }
+
     pub fn is_present(&self) -> bool { self.0 & 1 != 0 }
     pub fn is_huge(&self) -> bool { self.0 & (1 << 7) != 0 }
 }
@@ -80,6 +87,8 @@ use crate::BUDDY_ALLOCATOR;
 use crate::mem::page::pagealloc::PAGE_SIZE;
 use crate::mem::page::pagemapper::{Mapper, EARLY_PAGE_TABLE_LIMIT, KERNEL_VMA};
 
+static KERNEL_PML4: AtomicU64 = AtomicU64::new(0);
+
 /// 建立新的内核页表，返回 PML4 物理地址
 pub fn init_kernel_page_table(
     mem_map: &multiboot2::MemoryMapTag,
@@ -100,6 +109,7 @@ pub fn init_kernel_page_table(
         buddy.allocate_below(0, EARLY_PAGE_TABLE_LIMIT)
             .expect("no memory for PML4") as u64
     );
+    KERNEL_PML4.store(pml4_phys.as_u64(), Ordering::Relaxed);
 
     unsafe {
         let pml4_virt = (pml4_phys.as_usize() + KERNEL_VMA) as *mut PageTable;
@@ -107,7 +117,6 @@ pub fn init_kernel_page_table(
     }
 
     let mut mapper = unsafe { Mapper::new(pml4_phys, buddy) };
-
     // 1. 映射所有可用物理内存到 Higher Half（0xFFFF800000000000 + phys）
     for area in mem_map.memory_areas() {
         if area.typ() == MemoryAreaTypeId::from(1) { // 可用内存
@@ -131,8 +140,8 @@ pub fn init_kernel_page_table(
     set_identity_range(&mut mapper, mbi_start, mbi_end,
                        EntryFlags::PRESENT | EntryFlags::WRITABLE | EntryFlags::NX);
 
-    set_range(&mut mapper, symbol_addr(core::ptr::addr_of!(_text_start)), symbol_addr(core::ptr::addr_of!(_text_end)),
-          EntryFlags::PRESENT | EntryFlags::GLOBAL);
+    set_range(&mut mapper, symbol_addr(core::ptr::addr_of!(_text_start )), symbol_addr(core::ptr::addr_of!(_text_end)),
+              EntryFlags::PRESENT | EntryFlags::GLOBAL);
 
     set_range(&mut mapper, symbol_addr(core::ptr::addr_of!(_rodata_start)), symbol_addr(core::ptr::addr_of!(_rodata_end)),
           EntryFlags::PRESENT | EntryFlags::NX | EntryFlags::GLOBAL);
@@ -142,9 +151,68 @@ pub fn init_kernel_page_table(
 
     set_range(&mut mapper, symbol_addr(core::ptr::addr_of!(_bss_start)), symbol_addr(core::ptr::addr_of!(_bss_end)),
               EntryFlags::PRESENT | EntryFlags::WRITABLE | EntryFlags::NX | EntryFlags::GLOBAL);
-
     // TODO: 映射帧缓冲区（通过 multiboot2 framebuffer_tag 获取）
     pml4_phys
+}
+
+/// 返回当前内核页表的 PML4 物理地址。
+///
+/// 调度器创建内核线程时直接复用这个 CR3；创建用户进程时，则用它作为模板复制
+/// PML4 的高半区。这样用户进程拥有独立低半区地址空间，同时仍然能在陷入内核后
+/// 访问同一份高半区内核映射。
+pub fn kernel_pml4() -> PhysAddr {
+    let pml4 = KERNEL_PML4.load(Ordering::Relaxed);
+    assert!(pml4 != 0, "kernel page table is not initialized");
+    PhysAddr::from(pml4)
+}
+
+/// 为用户进程创建一个新的 PML4。
+///
+/// x86_64 常见布局是：
+/// - PML4[0..256)：用户低半区，每个进程独立；
+/// - PML4[256..512)：内核高半区，所有进程共享。
+///
+/// 这里复制内核 PML4 的高 256 项，低 256 项清零。后续 `map_into_page_table`
+/// 会只向这个新 PML4 的用户低半区添加用户代码、用户栈等映射。
+pub fn create_user_page_table() -> PhysAddr {
+    let kernel_pml4 = kernel_pml4();
+    let mut buddy_guard = BUDDY_ALLOCATOR.lock();
+    let buddy = buddy_guard
+        .as_mut()
+        .expect("Incorrect order of create_user_page_table and buddy allocator.");
+
+    let user_pml4 = PhysAddr::from(
+        buddy
+            .allocate_below(0, EARLY_PAGE_TABLE_LIMIT)
+            .expect("no memory for user PML4") as u64,
+    );
+
+    unsafe {
+        let kernel = (kernel_pml4.as_usize() + KERNEL_VMA) as *const PageTable;
+        let user = (user_pml4.as_usize() + KERNEL_VMA) as *mut PageTable;
+        (*user).entries.fill(PageTableEntry::new());
+
+        let mut index = 256;
+        while index < 512 {
+            (*user).entries[index] = (*kernel).entries[index];
+            index += 1;
+        }
+    }
+
+    user_pml4
+}
+
+/// 向指定 PML4 映射一页。
+///
+/// 这个函数是进程地址空间的基础接口。调用方显式传入要修改的 PML4，而不是隐式
+/// 修改当前 CR3，所以它可以在创建进程时为“尚未运行”的用户进程布置地址空间。
+pub fn map_into_page_table(pml4: PhysAddr, virt: VirtAddr, phys: PhysAddr, flags: EntryFlags) {
+    let mut buddy_guard = BUDDY_ALLOCATOR.lock();
+    let buddy = buddy_guard
+        .as_mut()
+        .expect("Incorrect order of map_into_page_table and buddy allocator.");
+    let mut mapper = unsafe { Mapper::new(pml4, buddy) };
+    mapper.map(virt, phys, flags);
 }
 
 /// 切换 CR3 到新页表
