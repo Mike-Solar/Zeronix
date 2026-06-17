@@ -1,5 +1,8 @@
 use core::arch::asm;
 use core::fmt::{Arguments, Write};
+
+use crate::lock::spin_lock::SpinLock;
+
 static mut CURRENT_LEVEL: LogLevel = LogLevel::Info;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LogLevel{
@@ -16,7 +19,44 @@ const COM1_MCR: u16 = 0x3FC;       // modem 控制寄存器
 const COM1_LSR: u16 = 0x3FD;       // 线状态寄存器
 const LSR_DATA_READY: u8 = 0x01;   // 接收缓冲区有数据
 const LSR_THRE: u8 = 0x20;         // 发送保持寄存器空位
+const SERIAL_INPUT_CAPACITY: usize = 256;
 
+struct SerialInput {
+    buf: [u8; SERIAL_INPUT_CAPACITY],
+    head: usize,
+    tail: usize,
+}
+
+impl SerialInput {
+    const fn new() -> Self {
+        Self {
+            buf: [0; SERIAL_INPUT_CAPACITY],
+            head: 0,
+            tail: 0,
+        }
+    }
+
+    fn push(&mut self, byte: u8) {
+        let next = (self.tail + 1) % SERIAL_INPUT_CAPACITY;
+        if next == self.head {
+            // 输入过快时丢弃最老字节，保证 IRQ handler 不阻塞。
+            self.head = (self.head + 1) % SERIAL_INPUT_CAPACITY;
+        }
+        self.buf[self.tail] = byte;
+        self.tail = next;
+    }
+
+    fn pop(&mut self) -> Option<u8> {
+        if self.head == self.tail {
+            return None;
+        }
+        let byte = self.buf[self.head];
+        self.head = (self.head + 1) % SERIAL_INPUT_CAPACITY;
+        Some(byte)
+    }
+}
+
+static SERIAL_INPUT: SpinLock<SerialInput> = SpinLock::new(SerialInput::new());
 
 #[macro_export]
 macro_rules! printk {
@@ -75,14 +115,18 @@ pub fn handle_serial_rx_interrupt() {
     unsafe {
         while crate::trap::inb(COM1_LSR) & LSR_DATA_READY != 0 {
             let byte = crate::trap::inb(COM1_DATA);
-            match byte {
-                b'\r' => {
-                    serial_putc(b'\r');
-                    serial_putc(b'\n');
-                }
-                byte => serial_putc(byte),
-            }
+            SERIAL_INPUT.lock().push(byte);
         }
+    }
+}
+
+pub fn read_serial_byte() -> Option<u8> {
+    SERIAL_INPUT.lock().pop()
+}
+
+pub fn serial_write(buf: &[u8]) {
+    for &byte in buf {
+        unsafe { serial_putc(byte); }
     }
 }
 

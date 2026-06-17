@@ -258,10 +258,7 @@ pub extern "C" fn __irq_handler(vector: u64) {
 
     match irq {
         0 => {
-            let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
-            if ticks % 100 == 0 {
-                printk!(LogLevel::Info, "timer tick {}", ticks);
-            }
+            TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
             pic::end_of_interrupt(irq);
             crate::task::proc::on_timer_tick();
             return;

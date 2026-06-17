@@ -125,12 +125,32 @@ pub fn init() {
 }
 
 pub fn init_runtime_fs() {
-    KERNEL_FS.lock().replace(RamFs::new());
+    let mut fs = RamFs::new();
+    seed_runtime_fs(&mut fs);
+    KERNEL_FS.lock().replace(fs);
     KERNEL_FD_TABLE.lock().replace(fd::FileDescriptorTable::new());
 }
 
 pub fn set_console_write(writer: fn(&[u8])) {
     CONSOLE_WRITE.lock().replace(writer);
+}
+
+pub fn with_runtime_fs<T>(f: impl FnOnce(&mut RamFs) -> T) -> Option<T> {
+    let mut guard = KERNEL_FS.lock();
+    let fs = guard.as_mut()?;
+    Some(f(fs))
+}
+
+fn seed_runtime_fs(fs: &mut RamFs) {
+    // 这些文件暂时是教学占位符：shell 已经把命令语义实现出来了，后续有 ELF
+    // loader 后，可以把它们替换成真正的用户态程序镜像，并由 exec 装载。
+    let programs: &[&str] = &["shell", "ls", "rm", "mv", "cp", "touch", "cat", "echo"];
+    for program in programs {
+        let mut path = alloc::string::String::from("/bin/");
+        path.push_str(program);
+        let _ = fs.write(&path, b"builtin\n");
+    }
+    let _ = fs.write("/home/readme.txt", b"Welcome to Zeronix shell.\n");
 }
 
 unsafe fn rdmsr(msr: u32) -> u64 {

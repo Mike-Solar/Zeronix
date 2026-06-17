@@ -8,7 +8,7 @@ pub mod commands;
 /// x86_64 机器码交给 `spawn_user` 映射到用户代码页。程序逻辑等价于：
 ///
 /// ```text
-/// write(1, "user syscall write ok\n", 22);
+/// write(1, "\r\nuser syscall write ok\r\nzeronix:/home$ ", 40);
 /// loop {}
 /// ```
 ///
@@ -22,7 +22,7 @@ pub mod commands;
 pub fn syscall_write_smoke_program() -> Vec<u8> {
     const SYS_WRITE: u32 = 6;
     const STDOUT: u32 = 1;
-    const MESSAGE: &[u8] = b"user syscall write ok\n";
+    const MESSAGE: &[u8] = b"\r\nuser syscall write ok\r\nzeronix:/home$ ";
 
     let mut code = Vec::new();
 
@@ -72,7 +72,7 @@ mod tests {
             code[lea_start + 5],
             code[lea_start + 6],
         ]) as isize;
-        let message = b"user syscall write ok\n";
+        let message = b"\r\nuser syscall write ok\r\nzeronix:/home$ ";
         let message_offset = code.len() - message.len();
         let target = lea_start as isize + 7 + disp;
 

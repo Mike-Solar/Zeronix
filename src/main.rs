@@ -3,6 +3,8 @@
 #![feature(alloc_error_handler)]
 extern crate alloc;
 
+use alloc::string::String;
+
 mod stdio;
 mod list;
 mod alloc_layout;
@@ -112,8 +114,13 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
     unsafe { trap::enable_interrupts(); }
 
     printk!(LogLevel::Info, "Zeronix boot successfully!");
+    let mut shell = Shell::new();
+    shell.print_prompt();
     loop {
         unsafe { trap::halt(); }
+        while let Some(byte) = stdio::read_serial_byte() {
+            shell.handle_byte(byte);
+        }
     }
 }
 #[panic_handler]
@@ -128,7 +135,64 @@ fn alloc_error(layout: Layout) -> ! {
 }
 
 fn serial_console_write(buf: &[u8]) {
-    for &byte in buf {
-        unsafe { stdio::serial_putc(byte); }
+    stdio::serial_write(buf);
+}
+
+struct Shell {
+    line: String,
+}
+
+impl Shell {
+    fn new() -> Self {
+        Self {
+            line: String::new(),
+        }
+    }
+
+    fn print_prompt(&self) {
+        stdio::serial_write(b"zeronix:/home$ ");
+    }
+
+    fn handle_byte(&mut self, byte: u8) {
+        match byte {
+            b'\r' | b'\n' => {
+                stdio::serial_write(b"\r\n");
+                self.run_line();
+                self.line.clear();
+                self.print_prompt();
+            }
+            8 | 127 => {
+                if self.line.pop().is_some() {
+                    stdio::serial_write(b"\x08 \x08");
+                }
+            }
+            byte if byte.is_ascii_graphic() || byte == b' ' => {
+                self.line.push(byte as char);
+                stdio::serial_write(&[byte]);
+            }
+            _ => {}
+        }
+    }
+
+    fn run_line(&mut self) {
+        let line = self.line.trim();
+        if line.is_empty() {
+            return;
+        }
+
+        let Some(result) = syscall::with_runtime_fs(|fs| user::commands::run_command(fs, line, b"")) else {
+            stdio::serial_write(b"shell: filesystem is not initialized\r\n");
+            return;
+        };
+
+        match result {
+            Ok(output) => {
+                stdio::serial_write(&output.stdout);
+                stdio::serial_write(&output.stderr);
+            }
+            Err(err) => {
+                printk!(LogLevel::Error, "shell command failed: {:?}", err);
+            }
+        }
     }
 }

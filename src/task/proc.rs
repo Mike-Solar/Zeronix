@@ -15,6 +15,11 @@ use crate::trap;
 use crate::trap::gdt::{self, USER_CODE_SELECTOR, USER_DATA_SELECTOR};
 use crate::BUDDY_ALLOCATOR;
 
+unsafe extern "C" {
+    static _bootdata_start: usize;
+    static _bootdata_end: usize;
+}
+
 const KERNEL_STACK_ORDER: usize = 2;
 const KERNEL_STACK_SIZE: usize = (1 << KERNEL_STACK_ORDER) * PAGE_SIZE;
 const USER_STACK_ORDER: usize = 1;
@@ -153,6 +158,7 @@ pub fn spawn_user(code: &[u8]) -> ProcRef {
     let user_code_base = user_code_base(pid);
     let user_stack_top = user_stack_top(pid);
     let pagetable = page::create_user_page_table();
+    map_bootdata_identity(pagetable);
 
     let (kstack_phys, code_phys, ustack_phys) = {
         let mut buddy_guard = BUDDY_ALLOCATOR.lock();
@@ -262,6 +268,31 @@ fn push_ready(proc_ref: ProcRef) {
         (*proc_ref.as_ptr()).state = ProcState::Ready;
     }
     READY_QUEUE.lock().push_back(proc_ref);
+}
+
+fn map_bootdata_identity(pagetable: PhysAddr) {
+    let bootdata_start = core::ptr::addr_of!(_bootdata_start) as usize;
+    let bootdata_end = core::ptr::addr_of!(_bootdata_end) as usize;
+    let start = align_down(bootdata_start, PAGE_SIZE);
+    let end = (bootdata_end + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+
+    // 当前内核从 32-bit/long-mode 启动栈进入 Rust，早期还没有主动把 RSP
+    // 切到高半区内核栈。第一次时钟中断触发调度时，`schedule()` 会先在
+    // 这段低地址 bootdata 栈上执行 `switch_cr3()`，然后才切到目标进程的
+    // 内核栈。如果用户页表没有保留这段 supervisor identity mapping，
+    // `mov cr3` 后紧跟着的 `ret` 会因为读低地址栈而 #PF，随后升级成 #DF。
+    //
+    // 这里映射的是 supervisor 页：最终 PTE 不带 USER 位。即使同一个低半区
+    // PML4 分支稍后因为用户代码/栈映射而把中间页表项提升为 USER，CPU 仍会
+    // 在最终 PTE 拒绝 Ring 3 访问这段 bootdata。
+    for addr in (start..end).step_by(PAGE_SIZE) {
+        page::map_into_page_table(
+            pagetable,
+            VirtAddr::from(addr as u64),
+            PhysAddr::from(addr as u64),
+            EntryFlags::PRESENT | EntryFlags::WRITABLE | EntryFlags::NX,
+        );
+    }
 }
 
 unsafe fn schedule() {
