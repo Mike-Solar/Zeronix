@@ -2,36 +2,23 @@ const PIC1_COMMAND: u16 = 0x20;
 const PIC1_DATA: u16 = 0x21;
 const PIC2_COMMAND: u16 = 0xA0;
 const PIC2_DATA: u16 = 0xA1;
+const PIC_EOI: u8 = 0x20;
 
 const ICW1_ICW4:u8 = 0x01;		/* Indicates that ICW4 will be present */
-const ICW1_SINGLE:u16 = 0x02;		/* Single (cascade) mode */
-const ICW1_INTERVAL:u16 = 0x04;		/* Call address interval 4 (8) */
-const ICW1_LEVEL:u16 = 0x08;		/* Level triggered (edge) mode */
 const ICW1_INIT:u8 = 0x10;		/* Initialization - required! */
 
 const ICW4_8086:u8 = 0x01;		/* 8086/88 (MCS-80/85) mode */
-const ICW4_AUTO:u16 = 0x02;		/* Auto (normal) EOI */
-const ICW4_BUF_SLAVE:u16 = 0x08;		/* Buffered mode/slave */
-const ICW4_BUF_MASTER:u16 = 0x0C;		/* Buffered mode/master */
-const ICW4_SFNM:u16 = 0x10;		/* Special fully nested (not) */
 
 const CASCADE_IRQ:u8 = 2;
 
-pub unsafe fn outb(port: u16, value: u8) {
-    unsafe {
-        core::arch::asm!(
-        "out dx, al",
-        in("dx") port,
-        in("al") value,
-        options(nomem, nostack, preserves_flags),
-        );
-    }
-}
+use crate::trap::{io_wait, outb};
 
-pub unsafe fn io_wait() {
-    unsafe {
-        outb(0x80, 0);
-    }
+pub const IRQ_BASE: u8 = 32;
+pub const IRQ_COUNT: u8 = 16;
+
+pub fn init()
+{
+    pic_remap(IRQ_BASE, IRQ_BASE + 8);
 }
 
 pub fn pic_remap(offset1: u8, offset2: u8)
@@ -55,8 +42,39 @@ pub fn pic_remap(offset1: u8, offset2: u8)
         outb(PIC2_DATA, ICW4_8086);
         io_wait();
 
-        // Unmask both PICs.
-        outb(PIC1_DATA, 0);
-        outb(PIC2_DATA, 0);
+        // Mask everything first. Individual IRQ lines can be unmasked later.
+        outb(PIC1_DATA, 0xff);
+        outb(PIC2_DATA, 0xff);
+    }
+}
+
+pub fn unmask_irq(irq: u8) {
+    if irq >= IRQ_COUNT {
+        return;
+    }
+
+    let (port, bit) = if irq < 8 {
+        (PIC1_DATA, irq)
+    } else {
+        (PIC2_DATA, irq - 8)
+    };
+
+    unsafe {
+        let mask = crate::trap::inb(port) & !(1 << bit);
+        outb(port, mask);
+
+        if irq >= 8 {
+            let master_mask = crate::trap::inb(PIC1_DATA) & !(1 << CASCADE_IRQ);
+            outb(PIC1_DATA, master_mask);
+        }
+    }
+}
+
+pub fn end_of_interrupt(irq: u8) {
+    unsafe {
+        if irq >= 8 {
+            outb(PIC2_COMMAND, PIC_EOI);
+        }
+        outb(PIC1_COMMAND, PIC_EOI);
     }
 }

@@ -39,8 +39,10 @@ pub mod exception_handler;
 /// | IRQ9~15 | 41~47  | 硬盘、网卡等             |
 use core::arch::{asm, global_asm};
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::trap::gdt::{DOUBLE_FAULT_IST_INDEX, KERNEL_CODE_SELECTOR};
+use crate::trap::pic::{self, IRQ_BASE, IRQ_COUNT};
 use crate::{printk, stdio::LogLevel};
 
 const IDT_ENTRIES: usize = 256;
@@ -92,6 +94,12 @@ struct DescriptorTablePointer {
 type Handler = unsafe extern "C" fn();
 
 static mut IDT: [IdtEntry; IDT_ENTRIES] = [IdtEntry::missing(); IDT_ENTRIES];
+static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
+
+pub fn init() {
+    init_entries();
+    load();
+}
 
 unsafe extern "C" {
     fn __exception_stub_0();
@@ -126,6 +134,22 @@ unsafe extern "C" {
     fn __exception_stub_29();
     fn __exception_stub_30();
     fn __exception_stub_31();
+    fn __irq_stub_32();
+    fn __irq_stub_33();
+    fn __irq_stub_34();
+    fn __irq_stub_35();
+    fn __irq_stub_36();
+    fn __irq_stub_37();
+    fn __irq_stub_38();
+    fn __irq_stub_39();
+    fn __irq_stub_40();
+    fn __irq_stub_41();
+    fn __irq_stub_42();
+    fn __irq_stub_43();
+    fn __irq_stub_44();
+    fn __irq_stub_45();
+    fn __irq_stub_46();
+    fn __irq_stub_47();
 }
 
 const EXCEPTION_HANDLERS: [Handler; 32] = [
@@ -163,7 +187,26 @@ const EXCEPTION_HANDLERS: [Handler; 32] = [
     __exception_stub_31,
 ];
 
-pub fn init_exceptions() {
+const IRQ_HANDLERS: [Handler; IRQ_COUNT as usize] = [
+    __irq_stub_32,
+    __irq_stub_33,
+    __irq_stub_34,
+    __irq_stub_35,
+    __irq_stub_36,
+    __irq_stub_37,
+    __irq_stub_38,
+    __irq_stub_39,
+    __irq_stub_40,
+    __irq_stub_41,
+    __irq_stub_42,
+    __irq_stub_43,
+    __irq_stub_44,
+    __irq_stub_45,
+    __irq_stub_46,
+    __irq_stub_47,
+];
+
+fn init_entries() {
     unsafe {
         let idt = core::ptr::addr_of_mut!(IDT) as *mut IdtEntry;
         let mut vector = 0;
@@ -177,6 +220,16 @@ pub fn init_exceptions() {
             vector += 1;
         }
 
+        let mut irq = 0;
+        while irq < IRQ_HANDLERS.len() {
+            (*idt.add(IRQ_BASE as usize + irq)).set_handler(IRQ_HANDLERS[irq], 0);
+            irq += 1;
+        }
+    }
+}
+
+fn load() {
+    unsafe {
         let pointer = DescriptorTablePointer {
             limit: (size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
             base: core::ptr::addr_of!(IDT) as u64,
@@ -184,6 +237,7 @@ pub fn init_exceptions() {
         asm!("lidt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
     }
 }
+
 
 #[unsafe(no_mangle)]
 pub extern "C" fn __cpu_exception_handler(vector: u64, error_code: u64, rip: u64) -> ! {
@@ -196,6 +250,29 @@ pub extern "C" fn __cpu_exception_handler(vector: u64, error_code: u64, rip: u64
     rip
  );
     panic!("unhandled CPU exception");
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn __irq_handler(vector: u64) {
+    let irq = vector.saturating_sub(IRQ_BASE as u64) as u8;
+
+    match irq {
+        0 => {
+            let ticks = TIMER_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            if ticks % 100 == 0 {
+                printk!(LogLevel::Info, "timer tick {}", ticks);
+            }
+        }
+        1 => {
+            let scancode = unsafe { crate::trap::inb(0x60) };
+            printk!(LogLevel::Info, "keyboard scancode {:#x}", scancode);
+        }
+        _ => {
+            printk!(LogLevel::Warning, "unexpected IRQ {} vector {}", irq, vector);
+        }
+    }
+
+    pic::end_of_interrupt(irq);
 }
 
 fn exception_name(vector: usize) -> &'static str {
@@ -289,9 +366,64 @@ global_asm!(
     EXCEPTION_WITH_ERROR 29
     EXCEPTION_WITH_ERROR 30
     EXCEPTION_NO_ERROR 31
+
+    .macro IRQ_STUB vector
+    .global __irq_stub_\vector
+    __irq_stub_\vector:
+        cld
+        push rax
+        push rcx
+        push rdx
+        push rbx
+        push rbp
+        push rsi
+        push rdi
+        push r8
+        push r9
+        push r10
+        push r11
+        push r12
+        push r13
+        push r14
+        push r15
+        mov rbx, rsp
+        and rsp, -16
+        mov rdi, \vector
+        call __irq_handler
+        mov rsp, rbx
+        pop r15
+        pop r14
+        pop r13
+        pop r12
+        pop r11
+        pop r10
+        pop r9
+        pop r8
+        pop rdi
+        pop rsi
+        pop rbp
+        pop rbx
+        pop rdx
+        pop rcx
+        pop rax
+        iretq
+    .endm
+
+    IRQ_STUB 32
+    IRQ_STUB 33
+    IRQ_STUB 34
+    IRQ_STUB 35
+    IRQ_STUB 36
+    IRQ_STUB 37
+    IRQ_STUB 38
+    IRQ_STUB 39
+    IRQ_STUB 40
+    IRQ_STUB 41
+    IRQ_STUB 42
+    IRQ_STUB 43
+    IRQ_STUB 44
+    IRQ_STUB 45
+    IRQ_STUB 46
+    IRQ_STUB 47
     "#
 );
-
-pub(crate) fn init() {
-    init_exceptions();
-}
