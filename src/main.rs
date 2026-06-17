@@ -95,6 +95,8 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
 
     unsafe {switch_cr3(addr);}
     trap::gdt::init();
+    syscall::init();
+    syscall::init_runtime_fs();
     trap::idt::init();
     task::proc::init();
     task::proc::spawn_user(&[0xeb, 0xfe]);
