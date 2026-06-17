@@ -242,7 +242,7 @@ global_asm!(
         mov rdx, [rsp]
         and rsp, -16
         sub rsp, 8
-        jmp __cpu_exception_panic
+        jmp __cpu_exception_handler
     .endm
 
     .macro EXCEPTION_WITH_ERROR vector

@@ -1,9 +1,11 @@
 #![no_std]
 #![no_main]
+#![feature(alloc_error_handler)]
 extern crate alloc;
 
 mod stdio;
 mod list;
+mod alloc_layout;
 
 // 链接器导出的符号：它们的"地址"就是物理地址值
 unsafe extern "C" {
@@ -16,7 +18,7 @@ mod mem;
 pub mod trap;
 pub mod lock;
 
-use core::mem::MaybeUninit;
+use core::alloc::Layout;
 use core::panic::PanicInfo;
 use multiboot2::BootInformation;
 use stdio::LogLevel;
@@ -25,7 +27,7 @@ use crate::lock::spin_lock::SpinLock;
 use crate::mem::page::{init_kernel_page_table, switch_cr3};
 
 
-static mut BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
+pub static BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
 // 课程设计：假设最大支持 512MB = 131072 页
 // PageInfo 8 字节 * 131072 = 1MB，放在 .bss 中
 const MAX_SUPPORTED_PAGES: usize = 131072;
@@ -76,9 +78,7 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
         (mbi_start, mbi_end),              // GRUB 传来的 MBI
     ];
 
-    unsafe {
-        BUDDY_ALLOCATOR.lock().replace(BuddyAllocator::new(metadata, mem_map, &reserved)));
-    }
+    BUDDY_ALLOCATOR.lock().replace(BuddyAllocator::new(metadata, mem_map, &reserved));
 
     let addr = init_kernel_page_table(
         &mem_map,
@@ -101,4 +101,9 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
 fn panic(_info: &PanicInfo) -> ! {
     printk!(LogLevel::Error, "{}", _info);
     loop {}
+}
+
+#[alloc_error_handler]
+fn alloc_error(layout: Layout) -> ! {
+    panic!("allocation error: {:?}", layout);
 }

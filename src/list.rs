@@ -6,10 +6,25 @@ pub struct ListNode{
     pub prev: *mut ListNode
 }
 
+unsafe impl Send for ListNode {}
+
 impl ListNode{
+    pub const fn uninit() -> Self {
+        Self {
+            next: null_mut(),
+            prev: null_mut(),
+        }
+    }
+
     pub fn new() -> Self{
-        let mut node = Self{next: null_mut(), prev: null_mut()};
-        node
+        Self::uninit()
+    }
+
+    pub unsafe fn init_at(ptr: *mut Self) {
+        unsafe {
+            (*ptr).next = ptr;
+            (*ptr).prev = ptr;
+        }
     }
 
     pub fn init(&mut self){
@@ -20,10 +35,9 @@ impl ListNode{
 #[macro_export]
 macro_rules! container_of_mut {
     ($ptr:expr, $name:ident, $container:ty) => {
-        unsafe {
-            use core::mem::offset_of;
+        {
             let ptr = $ptr as *mut _ as usize;
-            let offset = offset_of!($container, $name);
+            let offset = core::mem::offset_of!($container, $name);
             (ptr - offset) as *mut $container
         }
     };
@@ -31,10 +45,9 @@ macro_rules! container_of_mut {
 #[macro_export]
 macro_rules! container_of {
     ($node_ptr:expr, $name:ident, $container:ty) => {
-        unsafe {
-            use core::mem::offset_of;
+        {
             let ptr = $node_ptr as *mut _ as usize;
-            let offset = offset_of!($container, $name);
+            let offset = core::mem::offset_of!($container, $name);
             (ptr - offset) as *const $container
         }
     };
@@ -48,14 +61,13 @@ pub unsafe fn list_empty(head: *mut ListNode) -> bool{
     if head.is_null() {
         return true;
     }
-    if (*head).prev.is_null() || (*head).next.is_null() {
-        return true;
-    }
-    if (*head).prev == (*head).next {
-        return true;
-    }
-    if (*head).next == head || (*head).prev == head{
-        return true;
+    unsafe {
+        if (*head).prev.is_null() || (*head).next.is_null() {
+            return true;
+        }
+        if (*head).next == head && (*head).prev == head{
+            return true;
+        }
     }
     return false;
 }
@@ -204,5 +216,58 @@ unsafe fn _list_remove(prev: *mut ListNode, next: *mut ListNode){
     unsafe {
         (*prev).next = next;
         (*next).prev = prev;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_list_head_is_empty() {
+        let mut head = ListNode::uninit();
+        unsafe { ListNode::init_at(&mut head) };
+
+        assert!(unsafe { list_empty(&mut head) });
+    }
+
+    #[test]
+    fn single_insert_makes_list_non_empty_then_remove_restores_empty() {
+        let mut head = ListNode::uninit();
+        let mut node = ListNode::uninit();
+        unsafe {
+            ListNode::init_at(&mut head);
+            ListNode::init_at(&mut node);
+            list_append(&mut node, &mut head);
+
+            assert!(!list_empty(&mut head));
+            assert_eq!(head.next, &mut node as *mut _);
+            assert_eq!(head.prev, &mut node as *mut _);
+
+            list_remove(&mut node);
+            let node_ptr = &raw mut node;
+            assert!(list_empty(&mut head));
+            assert_eq!(node.next, node_ptr);
+            assert_eq!(node.prev, node_ptr);
+        }
+    }
+
+    #[test]
+    fn appends_preserve_order() {
+        let mut head = ListNode::uninit();
+        let mut a = ListNode::uninit();
+        let mut b = ListNode::uninit();
+        unsafe {
+            ListNode::init_at(&mut head);
+            ListNode::init_at(&mut a);
+            ListNode::init_at(&mut b);
+            list_append(&mut a, &mut head);
+            list_append(&mut b, &mut head);
+
+            assert_eq!(head.next, &mut a as *mut _);
+            assert_eq!(a.next, &mut b as *mut _);
+            assert_eq!(b.next, &mut head as *mut _);
+            assert_eq!(head.prev, &mut b as *mut _);
+        }
     }
 }
