@@ -1,3 +1,4 @@
+/// 模仿Linux内核中的侵入式链表
 use core::ptr::null_mut;
 
 pub struct ListNode{
@@ -8,8 +9,6 @@ pub struct ListNode{
 impl ListNode{
     pub fn new() -> Self{
         let mut node = Self{next: null_mut(), prev: null_mut()};
-        node.prev = &mut node as *mut ListNode;
-        node.next = &mut node as *mut ListNode;
         node
     }
 
@@ -41,6 +40,25 @@ macro_rules! container_of {
     };
 }
 
+///
+///
+///
+
+pub unsafe fn list_empty(head: *mut ListNode) -> bool{
+    if head.is_null() {
+        return true;
+    }
+    if (*head).prev.is_null() || (*head).next.is_null() {
+        return true;
+    }
+    if (*head).prev == (*head).next {
+        return true;
+    }
+    if (*head).next == head || (*head).prev == head{
+        return true;
+    }
+    return false;
+}
 
 /// 在两个已知节点之间插入新节点
 ///

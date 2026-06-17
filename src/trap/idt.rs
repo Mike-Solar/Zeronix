@@ -291,3 +291,7 @@ global_asm!(
     EXCEPTION_NO_ERROR 31
     "#
 );
+
+pub(crate) fn init() {
+    init_exceptions();
+}

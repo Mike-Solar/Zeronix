@@ -76,12 +76,12 @@ impl PageTable {
 }
 
 use multiboot2::MemoryAreaTypeId;
+use crate::BUDDY_ALLOCATOR;
 use crate::mem::page::pagealloc::{BuddyAllocator, PAGE_SIZE};
 use crate::mem::page::pagemapper::{Mapper, EARLY_PAGE_TABLE_LIMIT, KERNEL_VMA};
 
 /// 建立新的内核页表，返回 PML4 物理地址
 pub fn init_kernel_page_table(
-    buddy: &mut BuddyAllocator,
     mem_map: &multiboot2::MemoryMapTag,
     kernel_start: usize,
     kernel_end: usize,
@@ -90,6 +90,9 @@ pub fn init_kernel_page_table(
     mbi_start: usize,
     mbi_end: usize,
 ) -> PhysAddr {
+    // 这里BUDDY_ALLOCATIR一定已经初始化，否则直接panic也应该
+    let mut buddy = unsafe { BUDDY_ALLOCATOR }.lock()
+        .expect("Incorrect order of init page table and buddy allocator.");
     // 分配新 PML4（必须在 1GB 以内，否则启动页表访问不到）
     let pml4_phys = PhysAddr::from(
         buddy.allocate_below(0, EARLY_PAGE_TABLE_LIMIT)

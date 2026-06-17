@@ -1,4 +1,5 @@
 pub mod page;
+pub mod alloc;
 
 #[derive(Clone, Copy, Debug)]
 pub struct PhysAddr(usize) ;

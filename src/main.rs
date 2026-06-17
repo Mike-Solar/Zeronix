@@ -1,5 +1,6 @@
 #![no_std]
 #![no_main]
+extern crate alloc;
 
 mod stdio;
 mod list;
@@ -13,13 +14,18 @@ unsafe extern "C" {
 }
 mod mem;
 pub mod trap;
+pub mod lock;
 
+use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 use multiboot2::BootInformation;
 use stdio::LogLevel;
 use mem::page::pagealloc::*;
+use crate::lock::spin_lock::SpinLock;
 use crate::mem::page::{init_kernel_page_table, switch_cr3};
 
+
+static mut BUDDY_ALLOCATOR: SpinLock<Option<BuddyAllocator>> = SpinLock::new(None);
 // 课程设计：假设最大支持 512MB = 131072 页
 // PageInfo 8 字节 * 131072 = 1MB，放在 .bss 中
 const MAX_SUPPORTED_PAGES: usize = 131072;
@@ -70,10 +76,11 @@ pub extern "C" fn kernel_main(mbi_ptr: u64, magic: u32) -> ! {
         (mbi_start, mbi_end),              // GRUB 传来的 MBI
     ];
 
-    let mut buddy = BuddyAllocator::new(metadata, mem_map, &reserved);
+    unsafe {
+        BUDDY_ALLOCATOR.lock().replace(BuddyAllocator::new(metadata, mem_map, &reserved)));
+    }
 
     let addr = init_kernel_page_table(
-        &mut buddy,
         &mem_map,
         kernel_start,
         kernel_end,
