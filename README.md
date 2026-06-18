@@ -22,6 +22,16 @@
 - **POSIX 目标**：实现一个最小 POSIX.1 子集，支持用户态 shell 与基础工具
 - **运行环境**：QEMU（OVMF UEFI 固件），可扩展到真机
 
+## 运行命令
+
+```bash
+cargo kbuild
+cp target/x86_64-unknown-none/debug/zeronix iso/boot/zeronix 
+grub-mkrescue -o zeronix.iso iso  
+qemu-system-x86_64 -cdrom zeronix.iso -serial stdio -no-reboot -no-shutdown 
+
+```
+
 ## 快速入口
 
 如果你是第一次阅读，建议按以下顺序：

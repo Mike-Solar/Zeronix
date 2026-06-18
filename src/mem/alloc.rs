@@ -1,5 +1,6 @@
 /// # 内存分配器
-/// 使用空闲链表法的内核堆分配器。
+/// 使用空闲链表法的全局内核堆分配器
+/// 朝伙伴系统要内存块，然后分配给其他代码，Linux内核也是这样做的
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::mem::{align_of, size_of};
@@ -24,7 +25,9 @@ pub struct LinkedListAllocator {
     head: SpinLock<ListNode>,
 }
 
+/// 在Rust中，必须实现GlobalAlloc Trait才能用堆内存分配功能
 unsafe impl GlobalAlloc for LinkedListAllocator {
+    /// 分配内存
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let layout = normalize_layout(layout);
         let mut head_guard = self.head.lock();
@@ -42,7 +45,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             }
         }
     }
-
+    /// 释放内存
     unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
         if ptr.is_null() {
             return;
@@ -97,6 +100,7 @@ unsafe fn ensure_head_initialized(head: *mut ListNode) {
     }
 }
 
+/// 从空闲列表中分配内存
 unsafe fn allocate_from_free_list(head: *mut ListNode, layout: Layout) -> Option<*mut u8> {
     unsafe {
         if list_empty(head) {
@@ -131,7 +135,7 @@ unsafe fn allocate_from_free_list(head: *mut ListNode, layout: Layout) -> Option
         None
     }
 }
-
+/// 堆大小不够用，朝伙伴系统要
 unsafe fn grow_heap(head: *mut ListNode) -> bool {
     let mut buddy_guard = BUDDY_ALLOCATOR.lock();
     let buddy = buddy_guard
@@ -152,14 +156,21 @@ unsafe fn grow_heap(head: *mut ListNode) -> bool {
     true
 }
 
+/// 堆内存归还时，将其插入空闲链表并合并相邻块
 unsafe fn insert_and_coalesce(head: *mut ListNode, block: *mut HeapNode) {
     unsafe {
         let mut prev = head;
         let mut current = (*head).next;
         let block_addr = block as usize;
 
+        // 这里保留显式 ListNode 遍历，而不用 list_for_each_entry!：
+        // 空闲块需要按地址有序插入，插入时必须同时拿到 prev 和 current 两个链表节点。
+        // entry 遍历宏只暴露容器指针，适合“访问每个元素”，不适合这种要在两个节点
+        // 之间插入并随后按相邻地址合并的路径。
+        // current == head时说明到了末尾，即当前节点的地址是最靠后的，应该插入为最后一个节点
         while current != head {
             let current_block = container_of_mut!(current, list_node, HeapNode);
+            // 这种情况说明找到了最靠近要插入节点的地址更高的节点
             if current_block as usize >= block_addr {
                 break;
             }
@@ -167,12 +178,15 @@ unsafe fn insert_and_coalesce(head: *mut ListNode, block: *mut HeapNode) {
             current = (*current).next;
         }
 
+        // 执行插入
         let node = core::ptr::addr_of_mut!((*block).list_node);
         (*node).prev = prev;
         (*node).next = current;
         (*prev).next = node;
         (*current).prev = node;
 
+        
+        // 下面是合并相邻块
         let mut merged = block;
 
         if prev != head {

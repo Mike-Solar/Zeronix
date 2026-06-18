@@ -89,9 +89,6 @@ enum OpenFile {
 /// 2. 子进程 open("/tmp/x", WRITE|CREATE|TRUNC)，得到某个 fd；
 /// 3. 子进程 dup2(fd, 1)，把 stdout 指向该文件；
 /// 4. 子进程 exec("/bin/echo", ["echo", "hi"])。
-///
-/// 这里先实现内核侧 fd 表模型。它还没有接到真实进程结构里，但接口已经按每进程
-/// 独立 fd 表设计，后续只需要把 `FileDescriptorTable` 放进 `Proc`。
 #[derive(Clone)]
 pub struct FileDescriptorTable {
     entries: Vec<Option<OpenFile>>,

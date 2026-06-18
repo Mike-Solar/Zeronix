@@ -130,7 +130,7 @@ pub unsafe fn list_move_tail(entry: *mut ListNode, head: *mut ListNode) {
 #[macro_export]
 macro_rules! list_for_each {
     ($pos:ident, $head:expr, $body:block) => {
-        let head_ptr = $head as *mut ListNode;
+        let head_ptr = $head as *mut $crate::list::ListNode;
         let mut $pos = unsafe { (*head_ptr).next };
         while $pos != head_ptr {
             $body
@@ -153,7 +153,7 @@ macro_rules! list_for_each {
 #[macro_export]
 macro_rules! list_for_each_safe {
     ($pos:ident, $n:ident, $head:expr, $body:block) => {
-        let head_ptr = $head as *mut ListNode;
+        let head_ptr = $head as *mut $crate::list::ListNode;
         let mut $pos = unsafe { (*head_ptr).next };
         while $pos != head_ptr {
             let $n = unsafe { (*$pos).next };
@@ -178,11 +178,11 @@ macro_rules! list_for_each_safe {
 #[macro_export]
 macro_rules! list_for_each_entry {
     ($pos:ident, $head:expr, $type:ty, $member:ident, $body:block) => {
-        let head_ptr = $head as *mut ListNode;
-        let mut $pos = container_of_mut!(unsafe { (*head_ptr).next }, $type, $member);
-        while (&(*$pos).$member as *const ListNode) != head_ptr {
+        let head_ptr = $head as *mut $crate::list::ListNode;
+        let mut $pos = container_of_mut!((*head_ptr).next, $member, $type);
+        while (&(*$pos).$member as *const $crate::list::ListNode) != head_ptr {
             $body
-            $pos = container_of_mut!(unsafe { (*(*$pos).$member.next) }, $type, $member);
+            $pos = container_of_mut!((*$pos).$member.next, $member, $type);
         }
     };
 }
@@ -193,10 +193,10 @@ macro_rules! list_for_each_entry {
 #[macro_export]
 macro_rules! list_for_each_entry_safe {
     ($pos:ident, $n:ident, $head:expr, $type:ty, $member:ident, $body:block) => {
-        let head_ptr = $head as *mut ListNode;
-        let mut $pos = container_of_mut!(unsafe { (*head_ptr).next }, $type, $member);
-        while (&(*$pos).$member as *const ListNode) != head_ptr {
-            let $n = container_of_mut!(unsafe { (*(*$pos).$member.next) }, $type, $member);
+        let head_ptr = $head as *mut $crate::list::ListNode;
+        let mut $pos = container_of_mut!((*head_ptr).next, $member, $type);
+        while (&(*$pos).$member as *const $crate::list::ListNode) != head_ptr {
+            let $n = container_of_mut!((*$pos).$member.next, $member, $type);
             $body
             $pos = $n;
         }
@@ -222,6 +222,20 @@ unsafe fn _list_remove(prev: *mut ListNode, next: *mut ListNode){
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Entry {
+        value: u32,
+        node: ListNode,
+    }
+
+    impl Entry {
+        fn new(value: u32) -> Self {
+            Self {
+                value,
+                node: ListNode::uninit(),
+            }
+        }
+    }
 
     #[test]
     fn empty_list_head_is_empty() {
@@ -269,5 +283,52 @@ mod tests {
             assert_eq!(b.next, &mut head as *mut _);
             assert_eq!(head.prev, &mut b as *mut _);
         }
+    }
+
+    #[test]
+    fn entry_iteration_returns_containing_structs() {
+        let mut head = ListNode::uninit();
+        let mut a = Entry::new(1);
+        let mut b = Entry::new(2);
+        let mut values = alloc::vec::Vec::new();
+
+        unsafe {
+            ListNode::init_at(&mut head);
+            ListNode::init_at(&mut a.node);
+            ListNode::init_at(&mut b.node);
+            list_append(&mut a.node, &mut head);
+            list_append(&mut b.node, &mut head);
+
+            crate::list_for_each_entry!(entry, &mut head, Entry, node, {
+                values.push((*entry).value);
+            });
+        }
+
+        assert_eq!(values, alloc::vec![1, 2]);
+    }
+
+    #[test]
+    fn safe_entry_iteration_allows_removing_current() {
+        let mut head = ListNode::uninit();
+        let mut a = Entry::new(1);
+        let mut b = Entry::new(2);
+        let mut values = alloc::vec::Vec::new();
+
+        unsafe {
+            ListNode::init_at(&mut head);
+            ListNode::init_at(&mut a.node);
+            ListNode::init_at(&mut b.node);
+            list_append(&mut a.node, &mut head);
+            list_append(&mut b.node, &mut head);
+
+            crate::list_for_each_entry_safe!(entry, next, &mut head, Entry, node, {
+                values.push((*entry).value);
+                list_remove(&mut (*entry).node);
+                let _ = next;
+            });
+        }
+
+        assert_eq!(values, alloc::vec![1, 2]);
+        assert!(unsafe { list_empty(&mut head) });
     }
 }
