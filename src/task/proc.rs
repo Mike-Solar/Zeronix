@@ -412,8 +412,10 @@ fn map_bootdata_identity(pagetable: PhysAddr) {
     }
 }
 
+/// 抢占式多任务处理 进程切换
 unsafe fn schedule() {
     let interrupts_were_enabled = trap::interrupts_enabled();
+    // 必须暂时禁用中断防止被打断
     unsafe { trap::disable_interrupts(); }
 
     let next = {
@@ -437,23 +439,26 @@ unsafe fn schedule() {
     }
 
     unsafe {
+        // 老进程转就绪并入队
         if (*old.as_ptr()).state == ProcState::Running {
             (*old.as_ptr()).state = ProcState::Ready;
             READY_QUEUE.lock().push_back(old);
         }
 
+        // 新进程转运行并出队
         (*next.as_ptr()).state = ProcState::Running;
         (*next.as_ptr()).ticks_left = DEFAULT_TIME_SLICE_TICKS;
         write_current(Some(next));
         gdt::set_kernel_stack((*next.as_ptr()).kstack_top);
         page::switch_cr3((*next.as_ptr()).pagetable);
 
+        // 切换上下文
         __switch_context(
             core::ptr::addr_of_mut!((*old.as_ptr()).context),
             core::ptr::addr_of!((*next.as_ptr()).context),
         );
     }
-
+    // 恢复中断
     if interrupts_were_enabled {
         unsafe { trap::enable_interrupts(); }
     }
